@@ -32,6 +32,16 @@ Note: There are several different ways to solve these tasks, feel free to come u
 Read the cocktail dataset from: <https://github.com/nthun/cocktail-balance> You can also find the codebook there.
 
 ```{r}
+library(tidyverse)
+library(DT)
+```
+
+```{r echo=TRUE, paged.print=TRUE}
+
+url <- "https://raw.githubusercontent.com/nthun/cocktail-balance/master/cocktail_data.tsv"
+df  <- readr::read_tsv(url)
+
+knitr::kable(head(df))
 
 ```
 
@@ -110,7 +120,6 @@ tribble(~name, ~Lime, ~`White rum`, ~`Cane sugar`, ~`Coca-cola`, ~Mint, ~Soda,
 ```{r}
 
 ```
-
 
 Congrats, the bar is now officially open!
 
