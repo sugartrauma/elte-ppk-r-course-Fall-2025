@@ -41,7 +41,7 @@ library(DT)
 url <- "https://raw.githubusercontent.com/nthun/cocktail-balance/master/cocktail_data.tsv"
 df  <- readr::read_tsv(url)
 
-knitr::kable(head(df))
+head(df, 5)
 
 ```
 
@@ -49,8 +49,66 @@ knitr::kable(head(df))
 
 The ingredients are currently in a single cell for each cocktail. It would be better to put them in separate rows. Also, the variable should be cleaned of all quantities (e.g. 1/2 oz, 2 dashes, etc.), and the indicator of alcohol content (e.g. 47.3% abv). You will need to use this cleaned table in later tasks.
 
-```{r}
+I'd like to use a simple regex, which, after splitting the ingredients by the <br> tag, removes the first word after the number. But first, I want to make sure that this rule is consitent: number + quantity + ingredient
 
+```{r}
+# Split the ingredients column into individual ingredient lines
+non_numeric_starters <- df %>%
+  # Separate the ingredient string into a list of strings
+  mutate(ingredient_list = str_split(ingredients, "<br/>")) %>%
+  # Explode the list of ingredients into separate rows
+  unnest(ingredient_list) %>%
+  # Trim whitespace from the start/end of each ingredient line
+  mutate(ingredient_line = str_trim(ingredient_list)) %>%
+  # Filter for lines that DO NOT start with a digit
+  # The regex "^\\d" matches a digit at the start of the string.
+  filter(!str_detect(ingredient_line, "^\\d")) %>%
+  select(ingredient_line) %>%
+  distinct()
+
+datatable(non_numeric_starters)
+```
+
+The result is empty, so I go with my simple rule to save some monster regex from being born.
+
+```{r}
+cleaned_ingredients <- df %>%
+  # Split and unnest ingredients
+  mutate(ingredient_list = str_split(ingredients, "<br/>|<b4/>|<br>")) %>%
+  unnest(ingredient_list) %>%
+  # Trim initial whitespace
+  mutate(ingredient_line = str_trim(ingredient_list)) %>%
+
+  # Apply the cleaning rule:
+  # Remove number + first word (the unit) + everything in between.
+  mutate(
+    cleaned_name = str_replace(
+      ingredient_line,
+      # This is transparently generated with LLM. After 7 years in IT, I'm still terrified of Regex.
+      # Regex:
+      # ^[\\d\\./\\s-]+: Match the number/quantity part at the start (1, 3/4, 2.5, etc.).
+      # [^a-zA-Z]*: Match any non-letter characters (spaces, commas, etc.).
+      # \\s*: Match any trailing whitespace.
+      "^[\\d\\./\\s-]+[^a-zA-Z]*[a-zA-Z]+\\s*",
+      "" # Replace the matched prefix with an empty string
+    )
+  ) %>%
+  # Remove the abv
+  mutate(
+    cleaned_name = str_replace(
+      cleaned_name,
+      "\\s*\\([\\d\\.]+%\\s*abv\\)",
+      ""
+    )
+  ) %>%
+  mutate(cleaned_name = str_trim(cleaned_name)) %>%
+  filter(cleaned_name != "", !is.na(cleaned_name))
+  
+distinct_ingredients <- cleaned_ingredients %>%
+  distinct(cleaned_name)
+
+# Print the resulting list of distinct ingredients
+datatable(distinct_ingredients)
 ```
 
 ## 3. All ingredients in alphabetical order
@@ -58,7 +116,9 @@ The ingredients are currently in a single cell for each cocktail. It would be be
 Before opening the bar, you need to find a reliable supplier that has all the ingredients. You need to send a list of all possible ingredients you will need. They don't need the quantities (i.e. how many of these are needed), just the names of the ingredients.
 
 ```{r}
-
+distinct_ingredients_in_alphabetic = distinct_ingredients %>%
+  arrange(cleaned_name)
+datatable(distinct_ingredients_in_alphabetic)
 ```
 
 ## 4. Number of unique ingredients
@@ -66,15 +126,23 @@ Before opening the bar, you need to find a reliable supplier that has all the in
 How many different ingredients you will need?
 
 ```{r}
-
+datatable(distinct_ingredients %>%
+  count(name = "ingredients_count")
+)
 ```
+
+There are 62 unique ingredients.
 
 ## 5. What are the top 10 ingredients?
 
 What are the 10 most frequently used ingredients? If there are ties, you can list more than 10.
 
 ```{r}
+top10_ingredients <- cleaned_ingredients %>%
+  count(cleaned_name, sort = TRUE, name = "occurence") %>%   # counts & sorts desc
+  slice_head(n = 10)
 
+datatable(top10_ingredients)
 ```
 
 ## 6. Which cocktail(s) has/have the most ingredients?
@@ -82,7 +150,14 @@ What are the 10 most frequently used ingredients? If there are ties, you can lis
 Count the number of ingredients and filter all the cocktails that has that many.
 
 ```{r}
+ingredient_counts <- cleaned_ingredients %>%
+  count(name, name = "n_ingredients")
 
+max_n <- max(ingredient_counts$n_ingredients)
+
+cocktails_with_max <- ingredient_counts %>%
+  filter(n_ingredients == max_n)
+datatable(cocktails_with_max)
 ```
 
 ## 7. How many ingredients appear in only one cocktail (rare ingredient)?
@@ -90,19 +165,32 @@ Count the number of ingredients and filter all the cocktails that has that many.
 Count all cocktails with only one ingredient, and
 
 ```{r}
+ingredient_counts <- cleaned_ingredients %>%
+  distinct(name, cleaned_name) %>%   # avoid double-counting within one cocktail
+  count(cleaned_name, name = "n_cocktails")
 
+rare_ingredients <- ingredient_counts %>%
+  filter(n_cocktails == 1)
+
+datatable(rare_ingredients)
 ```
 
 ## 8. Which cocktail has an ingredient that is only used in one cocktail?
 
 ```{r}
-
+cocktails_with_rare <- cleaned_ingredients %>%
+  semi_join(rare_ingredients, by = "cleaned_name") %>%
+  distinct(name)
+datatable(cocktails_with_rare)
 ```
 
 ## 9. What are the cocktails without rare ingredients?
 
 ```{r}
-  
+cocktails_without_rare <- cleaned_ingredients %>%
+  distinct(name) %>%
+  anti_join(cocktails_with_rare, by = "name")
+datatable(cocktails_without_rare)
 ```
 
 ## 10. Create a cheat sheet for the bartender!
@@ -118,7 +206,17 @@ tribble(~name, ~Lime, ~`White rum`, ~`Cane sugar`, ~`Coca-cola`, ~Mint, ~Soda,
 ```
 
 ```{r}
+library(tidyverse)
 
+cocktail_matrix <- cleaned_ingredients %>%
+  distinct(name, cleaned_name) %>%     # ensure no duplicate pairs
+  mutate(value = "X") %>%              # mark presence
+  pivot_wider(
+    names_from = cleaned_name,
+    values_from = value,
+    values_fill = ""
+  )
+datatable(cocktail_matrix)
 ```
 
 Congrats, the bar is now officially open!
