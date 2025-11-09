@@ -59,7 +59,24 @@ In your discussion of the findings, briefly interpret the results of the above a
 Read the dataset used in this assignment. Pay attention to the extension of the datafile.
 
 ```{r}
+library(tidyverse)
+library(DT)
+library(skimr)
+library(lmtest)
+library(car)
+library(lm.beta)
+library(broom)
+library(gtsummary)
+library(knitr)
+library(kableExtra) 
+```
 
+```{r}
+current_folder <- dirname(rstudioapi::getSourceEditorContext()$path)
+data_folder <- file.path(dirname(current_folder), "data")
+
+df_raw <- readxl::read_excel(file.path(data_folder, "assignment_3_dataset.xlsx"))
+datatable(head(df_raw, 10))
 ```
 
 ## Data and model diagnostics 
@@ -68,54 +85,200 @@ Read the dataset used in this assignment. Pay attention to the extension of the 
 
 Run an exploratory data analysis (EDA) to investigate the dataset.
 
-```{r}
+```{r missing-values-check, eval=TRUE}
+skim(df_raw)
+```
 
+Based on this, the following columns seem off:
+- __pain__ - because p100 is 50, and 10 should be max, let's see a histogram
+- __sex__ - because this data seems to work with male/female, but there's 3 sexes
+- __mindfulness__ - because p100 is higher then 6
+
+```{r pain histogram, eval=TRUE}
+ggplot(data = df_raw, aes(x = pain)) +
+  geom_histogram(bins = 15, fill = "darkblue", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribution of Pain Scores",
+    x = "Pain Score (num)",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r sex-bar-chart, eval=TRUE}
+
+ggplot(data = df_raw, aes(x = sex, fill = sex)) +
+  geom_bar(color = "black") + 
+  labs(
+    title = "Distribution of Subjects by Sex",
+    x = "Sex Category",
+    y = "Count (Frequency)"
+  ) +
+  theme_minimal() +
+  guides(fill = "none")
+```
+
+```{r mindfulness histogram, eval=TRUE}
+ggplot(data = df_raw, aes(x = mindfulness)) +
+  geom_histogram(bins = 15, fill = "darkblue", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribution of Mindfulness Scores",
+    x = "MAAS Score",
+    y = "Frequency"
+  ) +
+  theme_minimal()
 ```
 
 #### Correct coding errors
 
 If you find values in the dataset during the EDA, that are not correct based on the provided descriptions of the variables of the dataset please correct them here.
 
-```{r}
+__EXPLANATION__: In the previous code block it seems that we need to fix these columns:
+- sex -> just code woman to female
+- pain -> check if the whole row with value 50 seems valid. If yes, I'll make 50 to 10, otherwise, I skip the row.
+- mindfulness -> since the value 7 is not as a big difference than with the pain scale's 500% increase, I'll cast it to 6.
 
+Start with the pain:
+```{r}
+print(df_raw %>%
+  filter(pain > 10)
+  )
 ```
+
+**Answer**
+Since the other fields seem normal, I'll just reduce pain to 10.
+
+```{r}
+df <- df_raw %>%
+  mutate(
+    sex = case_when(
+      sex == "woman" ~ "female",
+      sex %in% c("male", "female") ~ sex,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  mutate(
+    sex = as.factor(sex)
+  ) %>%
+  mutate(
+    pain = case_when(
+      pain > 10 ~ 10,
+      TRUE ~ pain
+    )
+  ) %>%
+  mutate(
+    mindfulness = case_when(
+      mindfulness > 6 ~ 6,
+      TRUE ~ mindfulness
+    )
+  )
+
+print("Sex distinct values")
+unique(df$sex)
+print("Max value of pain:")
+max(df$pain, na.rm = TRUE)
+print("Max value of mindfulness:")
+max(df$mindfulness, na.rm = TRUE)
+```
+
 
 ### Model diagnostics
 #### Build the more complex model
 
 In order to test the more complex model for outliers and to test the assumptions first build the model.
 
-```{r}
+```{r build-complex-model, eval=TRUE}
+# Outcome: pain
+# Predictors: age, sex, STAI_trait, pain_cat, mindfulness, 
+#              cortisol_serum, cortisol_saliva
 
-```
+model_complex <- lm(pain ~ age + sex + STAI_trait + pain_cat + 
+                           mindfulness + cortisol_serum + 
+                           cortisol_saliva, 
+                     data = df)
+
+print(summary(model_complex))
 
 #### Checking for influential outliers
 
+```
+
+
 Check for outlier values in the model.
 
-```{r}
+```{r check-cooks-distance, fig.width=8, fig.height=5}
+cooks_d <- cooks.distance(model_complex)
 
+# define the cutoff (rule of thumb: 4 / n)
+n <- nobs(model_complex)
+cutoff <- 4 / n
+
+plot(cooks_d, 
+     main = "Influential outliers: Cook's distance", 
+     ylab = "Cook's distance", 
+     xlab = "Observation number")
+# Add a horizontal line for the cutoff
+abline(h = cutoff, col = "red", lty = 2)
+
+influential_points <- which(cooks_d > cutoff)
+cat("--- Observations exceeding Cook's distance cutoff (4/n) ---\n")
+print(influential_points)
+
+print(cooks_d[influential_points])
+```
+
+```{r check-residuals-vs-leverage, fig.width=8, fig.height=6}
+# The red dashed lines are Cook's distance contours
+plot(model_complex, which = 5)
 ```
 
 #### Checking assumptions
 
 Check the normality assumption.
 
-```{r}
+```{r check-normality-qqplot, fig.width=7, fig.height=6, eval=TRUE}
+#  Q-Q plot
+plot(model_complex, which = 2)
 
+model_residuals <- residuals(model_complex)
+shapiro_test_result <- shapiro.test(model_residuals)
+cat("--- Shapiro-Wilk Normality Test ---\n")
+print(shapiro_test_result)
 ```
+__The Shapiro-Wilks test is not significant so we can't reject the null hypothesis of the data having normal distribution.__
+
 
 Check the linearity assumption.
 
-```{r}
+```{r check-linearity, fig.width=8, fig.height=6}
+plot(model_complex, which = 1)
 
+reset_test_result <- resettest(model_complex)
+
+cat("--- Ramsey RESET test for linearity ---\n")
+print(reset_test_result)
 ```
+**Answer**
+__The plot shows a sort of flat(tish) curve, which should be fine.__
+__Based on the Ramsey test: with p=0.2255 we couldn't reject the null hypothesis, so we don't suspect nonlinearity__
+
 
 Check the homoscedasticty assumption (homogeneity of variance).
 
-```{r}
+```{r check-homoscedasticity-plot, fig.width=8, fig.height=6, eval=TRUE}
+# "Scale-Location" plot
+plot(model_complex, which = 3)
 
+# Run the Breusch-Pagan test
+bp_test_result <- bptest(model_complex)
+cat("--- Breusch-Pagan Test for Homoscedasticity ---\n")
+print(bp_test_result)
 ```
+
+**Answer**
+Since the BP test is not significant, we can say the condition of homoscedasticty is not violated.
+
+
 
 Check the multicollinearity assumption.
 
@@ -126,66 +289,243 @@ https://statisticalhorizons.com/multicollinearity
 http://blog.minitab.com/blog/understanding-statistics/handling-multicollinearity-in-regression-analysis
 
 ```{r}
+vif_values <- vif(model_complex)
 
+cat("--- Variance Inflation Factor (VIF) ---\n")
+print(vif_values)
 ```
+
+**Answer**
+Based on the VIF scores it is visible that cortisol_serum and cortisol_saliva are way above threshold.
+Based on the statisticalhorizons article, this doesn't fall into the categories where we could ignore this.
+Having read the minitab article, I've decided to drop the saliva cortisol, as it is mentioned, serum is a better predictor.
+
 
 ### Making decision based on model diagnostics
 
 If based on the assumption tests you decide to drop a predictor variable you should do that here. Create your updated model.
 
 ```{r}
-
+model_complex_final <- lm(pain ~ age + sex + STAI_trait + pain_cat + mindfulness + cortisol_serum, data = df)
 ```
 
 #### Checking outliers of the updated model
 
 ```{r}
+cooks_d <- cooks.distance(model_complex_final)
 
+# define the cutoff (rule of thumb: 4 / n)
+n <- nobs(model_complex_final)
+cutoff <- 4 / n
+
+plot(cooks_d, 
+     main = "Influential outliers: Cook's distance", 
+     ylab = "Cook's distance", 
+     xlab = "Observation number")
+# Add a horizontal line for the cutoff
+abline(h = cutoff, col = "red", lty = 2)
+
+influential_points <- which(cooks_d > cutoff)
+cat("--- Observations exceeding Cook's distance cutoff (4/n) ---\n")
+print(influential_points)
+
+print(cooks_d[influential_points])
 ```
 
 #### Checking assumptions of the updated model
 
 Normality assumption
 
-```{r}
+```{r check-normality-qqplot-updated, fig.width=7, fig.height=6, eval=TRUE}
+#  Q-Q plot
+plot(model_complex_final, which = 2)
 
+model_residuals <- residuals(model_complex_final)
+shapiro_test_result <- shapiro.test(model_residuals)
+cat("--- Shapiro-Wilk Normality Test ---\n")
+print(shapiro_test_result)
 ```
+**Answer**
+__Shapiro-Wilks is still not significant, the Q-Q residuals plot is still okay(ish) with a heavy tail.__
+
 
 Linearity assumption
 
-```{r}
+```{r check-linearity-on-updated, fig.width=8, fig.height=6}
+plot(model_complex_final, which = 1)
 
+reset_test_result <- resettest(model_complex_final)
+
+cat("--- Ramsey RESET test for linearity ---\n")
+print(reset_test_result)
 ```
+**Answer**
+The Ramsey RESET test is still not significant. 
 
 Homoscedasticty assumption (homogeneity of variance)
 
-```{r}
+```{r check-homoscedasticity-plot-on-updated, fig.width=8, fig.height=6, eval=TRUE}
+# This plot (which = 3) is the standard "Scale-Location" plot
+plot(model_complex_final, which = 3)
 
+# Run the Breusch-Pagan test
+bp_test_result <- bptest(model_complex_final)
+cat("--- Breusch-Pagan Test for Homoscedasticity ---\n")
+print(bp_test_result)
 ```
+**Answer**
+BP test is still not significant, and the plot shows a quite flat red line, which seems okay.
+
 
 Multicollinearity assumption
 
 ```{r}
+vif_values <- vif(model_complex_final)
 
+cat("--- Variance inflation factor (VIF) ---\n")
+print(vif_values)
 ```
+**Answer**
+After removing the cortisol_saliva, all the VIF values are below 2 which is comforting.
+
 
 ## Model comparison
 
 Create the simple model and get the results of the model that needs to be reported based on the What to report section.
 
-```{r}
+__This is in the What to report section:__
+Report the results of the simpler model and the more complex model. For both models you should report the model test statistics (adj.R2, F, df, and p value). Also, report the statistics describing the coefficients of the predictors in a table format (unstandardized regression coefficients and 95% confidence intervals, standardized regression coefficients (B and Beta values), and p values).
 
+# Building simple model
+```{r simple-model-results, eval=TRUE}
+model_simple <- lm(pain ~ age + sex, data = df)
 ```
 
-Create the more complex model based on the results of the model diagnostics. Also, get the results that needs to be reported based on the What to report section.
 
-```{r}
+Coefficients of the predictors 
+```{r coefficient-table, message=FALSE, warning=FALSE}
+library(gtsummary)
 
+# Unstandardized B
+tbl_simple_B <- tbl_regression(
+  model_simple,
+  intercept = TRUE
+) %>%
+  modify_header(
+    estimate ~ "**B (Estimate)**"
+  )
+
+# Standardized Beta (estimate column now is Beta)
+tbl_simple_beta <- tbl_regression(
+  model_simple,
+  intercept = TRUE,
+  tidy_fun = tidy_standardize
+) %>%
+  modify_header(
+    estimate ~ "**Beta (Std.)**"
+  )
+
+# Combine B and Beta for the simple model
+table_simple <- tbl_merge(
+  tbls = list(tbl_simple_B, tbl_simple_beta),
+  tab_spanner = c("**B (Estimate)**", "**Beta (Std.)**")
+)
+
+
+# Unstandardized B
+tbl_complex_B <- tbl_regression(
+  model_complex_final,
+  intercept = TRUE
+) %>%
+  modify_header(
+    estimate ~ "**B (Estimate)**"
+  )
+
+# Standardized Beta
+tbl_complex_beta <- tbl_regression(
+  model_complex_final,
+  intercept = TRUE,
+  tidy_fun = tidy_standardize
+) %>%
+  modify_header(
+    estimate ~ "**Beta (Std.)**"
+  )
+
+table_complex <- tbl_merge(
+  tbls = list(tbl_complex_B, tbl_complex_beta),
+  tab_spanner = c("**B (Estimate)**", "**Beta (Std.)**")
+)
+
+
+# Merge the two tables
+tbl_merge(
+  tbls = list(table_simple, table_complex),
+  tab_spanner = c("**Simple Model**", "**Complex Model**")
+) %>%
+  as_gt() %>%
+  gt::tab_header(
+    title    = "Model Coefficient Comparison",
+    subtitle = "Unstandardized (B) and Standardized (Beta) Coefficients"
+  )
 ```
+**Answer**
+In the simple model, age is a significant but moderate negative predictor of the outcome (β = –0.28, p < .001).
+When additional variables such as Pain Catastrophizing and Cortisol (serum) are included in the complex model, the age effect becomes non-significant and small (β = –0.11, p = .20).
+In this expanded model, Pain Catastrophizing and Cortisol (serum) remain the only significant predictors, both showing moderate effect sizes (|β| ≈ 0.25–0.35).
 
-Compare the two models.
 
-```{r}
+```{r model-stats-df, message=FALSE, warning=FALSE}
+stats_simple <- glance(model_simple)
+stats_complex <- glance(model_complex_final)
 
+model_stats_df <- bind_rows(
+  "Simple Model" = stats_simple,
+  "Complex Model" = stats_complex,
+  .id = "Model"
+) %>%
+  # Columns to report (plus AIC/BIC for additional insights)
+  select(
+    Model,
+    `Adj. R-Squared` = adj.r.squared,
+    `F-statistic` = statistic,
+    `df (num)` = df,
+    `df (den)` = df.residual,
+    `p-value` = p.value,
+    AIC,
+    BIC
+  )
+
+kable(model_stats_df, Warning = FALSE,
+      digits = 3, 
+      caption = "Overall Model Test Statistics Comparison") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  )
 ```
+**Answer**
+The simple model showed a significant but modest overall fit, explaining about 7% of the variance (Adj. R² = .07, F(2,157) = 6.88, p = .001). The complex model provided a clearly better fit, explaining roughly 31% of the variance (Adj. R² = .31, F(6,153) = 12.95, p < .001). Model comparison indices that penalize complexity also favored the complex model (AIC: 592.19 vs. 547.93; BIC: 604.49 vs. 572.54), indicating that the additional predictors meaningfully improve model performance.
 
+
+```{r comparison-plot, fig.width=10, fig.height=5, message=FALSE, warning=FALSE}
+model_stats_long <- model_stats_df %>%
+  pivot_longer(
+    cols = c("Adj. R-Squared", "AIC"), 
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+ggplot(model_stats_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge", show.legend = FALSE) +
+  geom_text(aes(label = round(Value, 2)), vjust = -0.3) +
+  
+  # Use facet_wrap to create two separate plots
+  facet_wrap(~ Metric, scales = "free_y") +
+  
+  labs(
+    title = "Comparison of Simple vs. Complex Models",
+    x = NULL,
+    y = "Value"
+  ) +
+  theme_minimal(base_size = 14)
+```
