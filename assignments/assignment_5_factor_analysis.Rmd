@@ -9,6 +9,13 @@ editor_options:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+library(DT)
+library(broom)
+library(car)
+library(gtsummary)
+library(skimr)
+library(corrplot)
+library(psych)
 ```
 
 # Introduction
@@ -103,14 +110,24 @@ Talk about the limitations of your study and findings.
 Read the Animal Rights Scale (ARQ) dataset from the 'data/' folder. Pay attention to the extension.
 
 ```{r}
+current_folder <- dirname(rstudioapi::getSourceEditorContext()$path)
+data_folder <- file.path(dirname(current_folder), "data")
 
+df_raw <- read.csv(file.path(data_folder, "assignment_5_dataset.csv"))
+datatable(head(df_raw, 3))
 ```
 
 ## EDA
 
-```{r}
+```{r eval=TRUE}
+skim(df_raw)
+ars_items <- paste0("ar", 1:28)
 
+sapply(df_raw[ars_items], range, na.rm = TRUE)
 ```
+
+__ANSWER__
+Based on the histograms and percentiles shown in the skim report I see that there are no coding errors in the data, all are between 1 and 5 for the AR variables.
 
 ## Data manipulation
 
@@ -119,7 +136,18 @@ Recode the sex and party variables as factor type variables with the following l
   * party: 1 - democrat, 2 - republican, 3 - other, 4 - none
 
 ```{r}
-
+df_clean <- df_raw %>%
+  mutate(
+    # Recode the 'sex' variable
+    sex = factor(sex,
+                 levels = c(1, 2),
+                 labels = c("male", "female")),
+    
+    # Recode the 'party' variable
+    party = factor(party,
+                   levels = c(1, 2, 3, 4),
+                   labels = c("democrat", "republican", "other", "none"))
+  )
 ```
 
 # Creating a correlation matrix
@@ -127,100 +155,400 @@ Recode the sex and party variables as factor type variables with the following l
 __Note:__ Remember to only include the variables of the questionnaire that will be part of the factor analysis.
 
 ```{r}
-
+df <- df_raw %>% 
+  select(-sex, -party, -liberal)
 ```
 
 Create the correlation matrix.
 
-```{r}
+```{r echo=TRUE}
+cormat <- cor(
+  df,
+  use = "pairwise.complete.obs"
+  )
 
+# Function to check for
+# - Non-finite elements
+# - Zero variance vars
+# - If the matrix is symmetric
+check_cor_matrix <- function(M) {
+  list(
+    non_finite = sum(!is.finite(M)),
+    zero_variance_vars = which(apply(M, 1, function(x) all(is.na(x)))),
+    symmetric = isSymmetric(M)
+  )
+}
+
+check_cor_matrix(cormat)
 ```
+
+
+Let's see if any of the correlations are very high.
+```{r eval=TRUE}
+thr <- 0.80
+
+inds <- which(abs(cormat) > thr & row(cormat) != col(cormat), arr.ind = TRUE)
+
+data.frame(
+  var1 = rownames(cormat)[inds[,1]],
+  var2 = colnames(cormat)[inds[,2]],
+  r    = cormat[inds]
+)
+```
+The highest correlation is between ar5 and ar13, it's 0.83, which is quite high - but I wouldn't make any decisions about removing them yet - I'd like to see how they perform in the factor analysis. 
 
 ## Visualizing the correlation matrix
 
 Create a visualization of the results of the correlation matrix.
 
-```{r}
-
+```{r fig.width=10, fig.height=10}
+corrplot(cormat,
+         method = "color",
+         type = "lower",       # Show only the lower half 
+         order = "hclust",     # reorders items based on their correlation,
+                               # grouping similar items together.
+         addCoef.col = "black",
+         number.cex = 0.4,     # make the numbers small so they fit
+         tl.cex = 0.7,
+         addrect = 3,
+         diag = FALSE)
 ```
+__ANSWER__
+Checking on the matrix, there is no significant problem with multicollinearity - I see a mass of correlations below 0.3 which might be an indication that the factor structure won't be very robust, but since we cannot have effect on the experiment itself, I'll revisit this when I see the factor structre.
+
 
 ## Test for factorability
 
 Calculate the KMO score.
 
-```{r}
-
+```{r echo=TRUE}
+KMO(cormat)
 ```
+__ANSWER__
+The overall KMO of 0.88 indicates excellent sampling adequacy, meaning the data are highly suitable for factor analysis. All items exceed acceptable levels, with only a few (e.g., ar18 = 0.74, ar28 = 0.77) approaching the lower bound but still within an acceptable range.
 
 ## Test for multivariate normality
 
-```{r}
-
+```{r echo=TRUE}
+normality_results <- mardia(df, plot = TRUE)
+normality_results
 ```
+__ANSWER__
+The Mardia test shows strong, highly significant deviations from multivariate normality: both Mardia’s skewness and kurtosis have essentially zero p-values, so the multivariate normality assumption is clearly violated.
+Also, the Q-Q plot shows problems at the head and the tail - visibly moving away from the line.
+
+
+
+
 
 Test for skewness and kurtosis.
 
-```{r}
-
+__ANSWER__
+Since we know that the multivariate normality is violated, we specifically focus on problematic variables.
+```{r echo=TRUE}
+desc <- psych::describe(df)
+problem_vars <- subset(desc,
+                       abs(skew) > 1 | abs(kurtosis) > 1,
+                       select = c(mean, sd, skew, kurtosis))
+problem_vars
 ```
+There are 8 variables where either or both the skew and kurtosis are above 1.
+
+```{r echo=TRUE}
+problem_vars_higher_threshold <- subset(desc,
+                       abs(skew) > 1.5 | abs(kurtosis) > 1.5,
+                       select = c(mean, sd, skew, kurtosis))
+problem_vars_higher_threshold
+```
+This resulted in 4 variables with higher kurtosis and skewness.
+I don't drop them yet - let's see the factor structure first.
+
+
+Since normality is violated, I don't use Maximum Likelihood - I will pick MinRes.
 
 ## Create scree plot
 
 Create a scree plot to help the decision on how many factors to include.
 
-```{r}
 
+Since the Mardia test for multivariate normality has failed (is significant), I pick MINRes as a more robust method for factor analysis.
+
+```{r echo=TRUE}
+
+pa_results <- fa.parallel(
+  df, 
+  fm = "minres",
+  fa = "fa" # without this it shows PC too which is confusing
+  )
+
+print(pa_results)
 ```
+__ANSWER__
+First I used psych library's scree plot, but I removed it - it wasn't informative enough.
+Both the plot and the textual answer suggests we should go with 4 factors, because for the first 4 factor the actual data's eigenvalues are above the simulated data's factor values. Factor 5 has only 0.01 higher eigenvalue than simulated, which is not convincing for me - so I decided to go with 4 factors. 
 
 ## Run the factor analysis
 
 Run the factor analysis with the chosen number of factors.
 
-```{r}
+__ANSWER__
+I picked minres because of the violation of multivariate normality.
+I picked oblimin rotation because in psychology we accept the fact that factors correlate.
+```{r echo=TRUE}
+fa_model <- fa(df,
+               nfactors = 4,       # From our parallel analysis
+               fm = "minres",      # Because data wasn't normal
+               rotate = "oblimin") # Use an oblique (correlated) rotation
 
+# 'cut = 0.3' hides small loadings < 0.3
+print(fa_model, sort = TRUE, cut = 0.3)
 ```
+__ANSWER__
 
 Sort the communality scores in decreasing order.
 
-```{r}
+```{r echo=TRUE}
+# Access the communalities (h2) from your model
+communalities <- fa_model$communalities
 
+# Sort them in decreasing order
+sorted_communalities <- sort(communalities, decreasing = TRUE)
+sorted_communalities
 ```
 
 Calculate the mean communality scores.
 
-```{r}
+```{r echo=TRUE}
+mean(communalities)
+```
+__ANSWER__
+The mean of communalities is 0.41, which is quite low, so I need to refine my variables. 
+
+
+First I'd like to try if it helps to remove the columns that had bigger skewness and/or kurtosis than 2 to work with "normal" data.
+A note: ar3 had 0.83 correlation with ar15 and I wrote that I will assess later if it is a problem - now it was the time to remove ar3. 
+```{r echo=TRUE}
+df_refined <- df %>% 
+  select(-ar3, -ar14, -ar10, -ar26)
+
+fa_model <- fa(df_refined,
+               nfactors = 4,       # From our parallel analysis
+               fm = "minres",      # Because data wasn't normal
+               rotate = "oblimin") # Use an oblique (correlated) rotation
+
+# 'cut = 0.3' hides small loadings < 0.3
+communalities <- fa_model$communalities
+
+# Sort them in decreasing order
+sorted_communalities <- sort(communalities, decreasing = TRUE)
+sorted_communalities
+print(mean(communalities))
+```
+__ANSWER__
+Nope, it didn't help at all. 
+Now, I try removing the columns with the lowest communalities in the original model.
+
+```{r echo=TRUE}
+print(fa_model, sort = TRUE, cut = 0.3)
 
 ```
+
+
+```{r echo=TRUE}
+df_refined <- df %>% 
+  select(-ar16, -ar3, -ar28, -ar8, -ar14, - ar18, -ar22, -ar1)
+
+fa_model <- fa(df_refined,
+               nfactors = 4,       # From our parallel analysis
+               fm = "minres",      # Because data wasn't normal
+               rotate = "oblimin") # Use an oblique (correlated) rotation
+
+# 'cut = 0.3' hides small loadings < 0.3
+communalities <- fa_model$communalities
+
+# Sort them in decreasing order
+sorted_communalities <- sort(communalities, decreasing = TRUE)
+sorted_communalities
+print(mean(communalities))
+
+```
+__ANSWER__
+The mean communalities increased from 0.42 to 0.49. 
+Also, the h2 values for individual elements are all above 0.3 (except ar25 with a 0.29 value) - which is a generic rule of thumb for level of acceptance.
+
+Looking at the factor loadings, there are only two variables who are members of two factors - but each has a dominant one, so I accept this as a reasonable limitation.
+
+Let's print a narrower table to see the _eigenvalues_, _explained variables_ and _cumulative variance_ explained.
+```{r echo=TRUE}
+print(fa_model$Vaccounted)
+mean(communalities)
+```
+
+I named the factors the following:
+
+* **Opposition to animal research**
+
+* **Opposition to using animals for human products**
+
+* **Animals should have rights similar to people**
+
+* **Opposition to killing animals**
+
+
+Statistically our factors are medium quality at best - but in the research aspect I'm somewhat satisfied: the factors are distinguishable, we have different ones for focus areas such as research, animals-as-products, rights and attitude on killing animals. So I think even though I've seen better metrics, the factors are valid in my opinion.
+
 
 Show the factor loadings for the chosen factor structure.
 
 ```{r}
-
+print(fa_model, sort = TRUE, cut = 0.3)
 ```
 
 Visualize the factor structure.
 
 ```{r}
+fa.diagram(fa_model, 
+           cut = 0.3, 
+           main = "Factor Structure of the Animal Rights Scale")
+```
 
+
+```{r}
+# 1. Create a reference list of item descriptions 
+# (I added the descriptions for the items in your final model)
+item_descriptions <- c(
+  "ar17" = "Viable alternatives to animal research exist",
+  "ar2"  = "Animal research cannot be justified",
+  "ar6"  = "Medical research on animals is unnecessary",
+  "ar27" = "Psychological research on animals is unnecessary",
+  "ar11" = "Pests should be removed rather than killed",
+  "ar9"  = "Need more regulations governing animal research",
+  "ar25" = "Most cosmetics research is unnecessary",
+  "ar5"  = "Wrong to wear leather jackets and pants",
+  "ar13" = "Wrong to wear leather belts and shoes",
+  "ar4"  = "No right to use horse for transport/entertainment",
+  "ar23" = "Wrong to wear animal fur",
+  "ar26" = "Morally wrong to eat chicken and fish",
+  "ar10" = "Morally wrong to eat beef and 'red' meat",
+  "ar7"  = "Considered becoming a vegetarian",
+  "ar24" = "Appropriate to kill animals that destroy property",
+  "ar21" = "No alternatives but to do animal research",
+  "ar19" = "New drugs should be tested on animals first",
+  "ar20" = "Very concerned about pain and suffering",
+  "ar15" = "Time to extend basic rights to animals",
+  "ar12" = "Animals should have same rights as humans"
+)
+
+# 2. Extract Loadings and Communalities
+#    fa.sort() automatically groups items by their strongest factor
+sorted_model <- fa.sort(fa_model)
+loadings_df <- data.frame(unclass(sorted_model$loadings))
+communalities <- sorted_model$communalities
+
+# 3. Clean up the table
+final_table <- loadings_df %>%
+  # Add the communality column (h2)
+  mutate(h2 = communalities) %>%
+  # Add the descriptions (matching by row name)
+  mutate(Description = item_descriptions[rownames(.)]) %>%
+  # Round all numbers to 2 decimal places
+  mutate(across(where(is.numeric), \(x) round(x, 2))) %>%
+  # Move Description to the front
+  select(Description, everything()) 
+
+# 4. Hide small loadings (make them blank) for readability
+#    (This affects the view only, converts numbers to text)
+final_table_clean <- final_table %>%
+  mutate(across(starts_with("MR"), \(x) ifelse(abs(x) < 0.3, "", x))) %>%
+  rename(
+    "Animal Research" = MR1,
+    "Animal as product" = MR2,
+    "Killing animals" = MR4,
+    "Animal rights" = MR3,
+    "Communality (h2)" = h2
+  )
+
+# 5. View the final table
+datatable(final_table_clean, options = list(pageLength = 30))
 ```
 
 ## Run linear regression
 
 Calculate the factor scores.
 
-```{r}
-
+```{r echo=TRUE}
+factor_score_labels <- fa_model$scores
 ```
 
 Bind factor scores to the original dataset.
 
 ```{r}
-
+dataset_with_scores <- cbind(df_raw, factor_score_labels)
 ```
 
-Run the logistic regression.
+Run the linear regression.
 
 ```{r}
+fit <- lm(liberal ~ MR1 + MR2 + MR4 + MR3, data = dataset_with_scores)
 
+vif(fit)
 ```
+__ANSWER__
+VIF values are below 2, which is acceptable and we can state we see no multicollinearity.
+
+```{r}
+summary(fit)
+```
+__ANSWER__
+he regression model indicated that Factor 4 (Opposition to killing animals) was the only significant predictor of political views (b=0.39,t=3.83,p<.001).
+
+
+
+# Summary
+Note: I wrote the codes and my inline comments myself - but I asked an LLM to summarize my comments and process to this section. 
+
+### Summary
+
+* **Data quality & factorability**
+
+  * All AR items were within the expected 1–5 range, and I did not detect any obvious coding errors.
+  * The correlation matrix was mostly in the low–moderate range; only ar5–ar13 showed a very high correlation (r = .83), which I flagged but initially kept.
+  * The overall KMO was excellent (0.88), and all items were in the acceptable range, so the data were clearly suitable for factor analysis.
+
+* **Assumptions & method choices**
+
+  * Mardia’s test and the Q–Q plot both indicated strong violations of multivariate normality.
+  * Several items showed substantial skewness and/or kurtosis.
+  * Because of this, I decided not to use Maximum Likelihood and chose MINRES with oblimin (oblique) rotation instead, assuming the factors are correlated.
+
+* **Number of factors**
+
+  * Parallel analysis (based on MINRES factor analysis) and the scree plot both supported a 4-factor solution.
+  * I therefore kept 4 factors in all subsequent models.
+
+* **Trials to exclude variables**
+
+  * The initial 4-factor model had a low mean communality (around 0.41), so I tried two approaches to improve it:
+
+    1. First, I removed items with the most extreme skewness/kurtosis (ar3, ar10, ar14, ar26) to work with “more normal” data. This did not meaningfully improve the communalities.
+    2. Next, I returned to the original model and excluded up to eight items with the lowest communalities and weakest contribution (ar16, ar3, ar28, ar8, ar14, ar18, ar22, ar1), staying within the assignment’s limit.
+  * After this second step, the mean communality increased to about 0.49, and most remaining items were above the 0.30 rule-of-thumb (with ar25 at 0.29 as a borderline case).
+
+* **Final factor structure**
+
+  * The final rotated solution was interpretable, with mostly clear dominant loadings and only a couple of notable cross-loadings.
+  * I labelled the factors as:
+
+    1. Opposition to animal research
+    2. Opposition to using animals for human products
+    3. Animals should have rights similar to people
+    4. Opposition to killing animals
+  * Factors are reasonably coherent conceptually.
+
+* **Regression on liberalism**
+
+  * I saved the factor scores and used them as predictors of self-rated liberalism.
+  * VIF values were all below 2, so I did not find problematic multicollinearity.
+  * Only the “Opposition to Killing Animals” factor significantly predicted liberalism (b = 0.39, t = 3.83, p < .001); the other three factors were not significant.
+  * In this sample, the attitude towards killing animals were the clearest attitudinal marker of how liberal participants rated themselves.
 
