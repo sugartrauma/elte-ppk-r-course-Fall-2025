@@ -1,0 +1,509 @@
+---
+title: "UFO sightings"
+author: "Barna Lipics"
+date: "2025-12-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(broom)
+library(maps)
+library(scales)
+library(skimr)
+library(rworldmap)
+library(sp)
+library(DT)
+library(car)
+library(performance)
+library(gt)
+library(gtsummary)
+```
+
+## UFO Sightings
+
+This is an analysis on UFO sightings for Statistical analysis in R course in ELTE PPK, 2025-26 I. semester.
+
+```{r echo=TRUE}
+# Read data directly from the web source
+ufo_raw <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2019/2019-06-25/ufo_sightings.csv")
+
+# Quick look at the raw data structure
+skim(ufo_raw)
+```
+
+## Setting the variable types and basic cleaning
+- Recode unknown, other, etc. to NA
+- Add continent field
+- Add country field, since the data contains only 5 values, which is not right.
+
+```{r echo=TRUE}
+# To add continent information
+coords_lookup <- function(points, output_type = "continent") {  
+  results <- rep(NA, nrow(points))
+  
+  # Identify valid points
+  valid_indices <- which(!is.na(points$longitude) & !is.na(points$latitude))
+  
+  # Early exit if no valid data
+  if(length(valid_indices) == 0) return(results)
+  
+  # Extract valid points
+  valid_points <- points[valid_indices, c("longitude", "latitude")]
+  
+  # 'low' resolution is faster
+  countriesSP <- getMap(resolution='low')
+  
+  # Spatial overlay
+  pointsSP = SpatialPoints(valid_points, proj4string=CRS(proj4string(countriesSP)))  
+  indices = over(pointsSP, countriesSP)
+  
+  # Select output based on parameter
+  if(output_type == "continent") {
+    # 'REGION' is the column for continents in rworldmap
+    results[valid_indices] <- as.character(indices$REGION)
+  } else if (output_type == "country") {
+    # 'ADMIN' is the column for country names
+    results[valid_indices] <- as.character(indices$ADMIN)
+  } else {
+    warning("Invalid output_type. Please use 'continent' or 'country'.")
+  }
+  
+  return(results)
+}
+
+ufo_clean <- ufo_raw %>%
+  # Parse the date_time column (mdy_hm format)
+  mutate(date_time = mdy_hm(date_time)) %>%
+  # Recode the unknowns to one category
+  mutate(ufo_shape = ifelse(ufo_shape %in% c("unknown", "other", "NA"), NA, ufo_shape)) %>%
+  # Add the continent and country field
+  mutate(
+      # Call 1: Get continent
+      continent = coords_lookup(data.frame(longitude, latitude), output_type = "continent"),
+      # Call 2: Get country Name
+      country = coords_lookup(data.frame(longitude, latitude), output_type = "country")
+    ) %>%
+  # Extract useful time components
+  mutate(
+    year = year(date_time),
+    hour = hour(date_time),
+    # Categorize time of day
+    time_of_day = case_when(
+      hour >= 6 & hour < 12 ~ "Morning",
+      hour >= 12 & hour < 18 ~ "Afternoon",
+      hour >= 18 & hour < 24 ~ "Evening",
+      TRUE ~ "Night"
+    )
+  ) %>%
+  # Convert character columns to factors for modeling
+  mutate(
+    ufo_shape = as.factor(ufo_shape),
+    country = as.factor(country),
+    continent = as.factor(continent)
+  )
+```
+
+## Let's see some basic statistics
+- Top 10 countries
+- Number of observations by continent
+- Numbers of observations by shape
+
+It is interesting to see that either UFOs are showing up to English-speaking countries mostly - or the sourcing of the data is focused on that. Having the US as top alone wouldn't be interesting, but the fact that the top 4 are English-speaking countries raises the question if that is a cultural thing to look more for UFOs.
+
+```{r echo=TRUE}
+# Top 10 Countries by number of observations
+top_countries <- ufo_clean %>%
+  filter(!is.na(country) & country != "") %>%
+  count(country, name = "Count") %>%
+  arrange(desc(Count)) %>%
+  head(10)
+
+DT::datatable(
+  top_countries, 
+  caption = "Table 1: Top 10 Countries with most UFO Sightings",
+  options = list(pageLength = 10, dom = 't')
+)
+
+# Observations by continent
+continent_counts <- ufo_clean %>%
+  filter(!is.na(continent) & continent != "") %>%
+  count(continent, name = "Count") %>%
+  arrange(desc(Count))
+
+DT::datatable(
+  continent_counts, 
+  caption = "Table 2: UFO Sightings by Continent",
+  options = list(pageLength = 10, dom = 't')
+)
+
+ufo_clean %>%
+  count(ufo_shape) %>%
+  mutate(ufo_shape = fct_reorder(ufo_shape, n)) %>%
+  # Filter to top 15 shapes for readability
+  top_n(15, n) %>%
+  ggplot(aes(x = n, y = ufo_shape)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = n), hjust = -0.2, size = 3) +
+  theme_minimal() +
+  labs(
+    title = "Most Common UFO Shapes",
+    subtitle = "Simple 'Light' is the most common report, followed by 'Triangle' and 'Circle'",
+    x = "Number of Sightings",
+    y = NULL
+  )
+```
+
+
+## Visualizing the sightings on the world map.
+It seems that the sightings are heavily concentrated in the USA and Europe, but also India and Australia has some more prevalent sightings.
+Probably the data is not as thoroughly administered in the less developed countries, because most probably UFOs are not that picky. 
+
+Another reason could be that people in more developed countries are more exposed to news and media that raises their awareness/interest in UFOs. 
+
+Most probably the distribution of data is related to the mix of these factors.
+
+```{r echo=TRUE}
+# Get world map data
+world_map <- map_data("world")
+
+ggplot() +
+  # Draw the world map
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group), 
+               fill = "gray80", color = "white") +
+  # Overlay UFO sightings
+  geom_point(data = ufo_clean, aes(x = longitude, y = latitude, color = time_of_day), 
+             alpha = 0.5, size = 0.8) +
+  scale_color_viridis_d(option = "plasma", name = "Time of Day") +
+  theme_minimal() +
+  labs(
+    title = "Global Distribution of UFO Sightings",
+    subtitle = "Sightings are heavily concentrated in North America and Europe",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme(legend.position = "bottom")
+```
+## Shape preference per continent
+We can see an interesting attribute of data - in more developed regions like North America and Europe the triangle is more prevalent shape compared to less developed regions.
+A proportions test was added to check if there's a statistical difference - it turns out there's a statistically significant but meaninglessly small difference between Western and non-Western countries in the amount of triangle sightings. 
+
+```{r echo=TRUE}
+
+# Identify continents with enough data to be meaningful
+# (e.g., at least 50 sightings total)
+valid_continents <- ufo_clean %>%
+  filter(!is.na(continent) & continent != "") %>%
+  count(continent) %>%
+  filter(n > 50) %>%
+  pull(continent)
+
+shape_geography <- ufo_clean %>%
+  # Filter to common shapes
+  filter(ufo_shape %in% c("light", "triangle", "circle", "fireball", "sphere", "disk", "oval", "cigar")) %>%
+  # Remove low-data continents and NA
+  filter(continent %in% valid_continents) %>% 
+  count(continent, ufo_shape) %>%
+  group_by(continent) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# Plot: Small multiples
+ggplot(shape_geography, aes(x = prop, y = reorder(ufo_shape, prop))) +
+  geom_col(aes(fill = continent), show.legend = FALSE) +
+  facet_wrap(~continent, scales = "free_x") + # Create a separate panel for each continent
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Most Common UFO Shapes by Continent",
+    subtitle = "Comparing the proportion of reported shapes across different regions.",
+    x = "Percentage of Total Sightings in Region",
+    y = NULL
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "gray20"),
+    strip.text = element_text(color = "white", face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+### Hypothesis Test: The "Western Triangle" Theory
+# Research Question: Are Triangle sightings significantly more prevalent in Western countries?
+
+# Define the groups
+triangle_test_data <- ufo_clean %>%
+  filter(!is.na(continent), !is.na(ufo_shape)) %>%
+  mutate(
+    # Define "Western" as North America, Europe, and Australia
+    is_western = ifelse(continent %in% c("North America", "Europe"), "Western", "Non-Western"),
+    # Define "Target Shape"
+    is_triangle = ifelse(ufo_shape == "triangle", "Triangle", "Other")
+  )
+
+table_triangle <- table(triangle_test_data$is_western, triangle_test_data$is_triangle)
+
+# Run a Proportions Test 
+prop_result <- prop.test(table_triangle)
+
+# Display Results
+datatable(tidy(prop_result))
+
+```
+
+## Detail of shape vs. time
+I had a theory that if people are __really__ observing something, the longer they see them, the more details they'll be able to recall. In our case, my thought is that more time they see it the more specific shape they'll describe - so instead of __light__ they'll be able to recall a __triangle__.
+Based on cognitive theories, I bucketed the time of observations to these categories:
+1. Psychological Present (~3s): Pöppel (1997); Wittmann (2011)
+2. Working Memory Limit (~30s): Cowan (2010)
+3. Retrospective Estimation (>3m): Block & Zakay (1997)
+
+The chi-square test is statistically significant (p < 0.001) and the value is strong.
+Looking at the visualization and the chi-square test together, we can see that the data supports the hypothesis that very short sightings result in more vague description of the shape. Beyond 3 seconds we cannot see a difference, which makes sense. This somewhat indicates that in some cases the observers see at least something real-  there wouldn't be a notable difference in the shape if they have made it up totally. 
+
+```{r echo=TRUE}
+ufo_cognitive <- ufo_clean %>%
+  filter(!is.na(ufo_shape), !is.na(encounter_length)) %>%
+  mutate(
+    cognitive_bin = case_when(
+      # The 3-second integration window (Pöppel, 1997)
+      encounter_length <= 3 ~ "1. Psychological Present (<3s)",
+      
+      # Working memory decay limit without rehearsal (Cowan, 2010)
+      encounter_length <= 30 ~ "2. Working Memory (3-30s)",
+      
+      # Attention-based "Prospective" estimation window (Block & Zakay, 1997)
+      encounter_length <= 180 ~ "3. Intermediate (30s-3m)",
+      
+      # "Retrospective" reconstruction (Long-term memory retrieval)
+      TRUE ~ "4. Long-Term Reconstruction (>3m)"
+    ),
+    
+    # Define "High Detail" shapes vs "Low Detail" shapes
+    is_detailed = ifelse(
+      ufo_shape %in% c("triangle", "disk", "cigar", "formation", "diamond"), 
+      "Detailed Structure", 
+      "Vague (Light/Flash)"
+    )
+  )
+
+# Visualization
+ggplot(ufo_cognitive, aes(x = cognitive_bin, fill = is_detailed)) +
+  geom_bar(position = "fill") + 
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_viridis_d(option = "cividis", name = "Reported Detail") +
+  theme_minimal() +
+  labs(
+    title = "The 'Psychological Present' Effect on UFO Reporting",
+    subtitle = "Sightings lasting longer than the 3-second integration window show a massive jump in structural detail.",
+    x = "Cognitive Time Processing Bin",
+    y = "Proportion of Reports",
+    caption = "Bin definitions based on Pöppel (1997) and Cowan (2010)"
+  ) +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+# Chi-Square
+chi_sq_result <- chisq.test(table(ufo_cognitive$cognitive_bin, ufo_cognitive$is_detailed))
+
+# Tidy the results into a dataframe
+chi_sq_df <- tidy(chi_sq_result)
+DT::datatable(
+  chi_sq_df,
+  caption = "Table: Chi-Square Test Results (Cognitive Bins vs. Detail)",
+  options = list(dom = 't'),
+  rownames = FALSE # Hides the row number "1"
+) %>%
+  DT::formatRound(columns = c("statistic", "p.value"), digits = 4)
+```
+
+## Identify mass-observations
+I assume that a sighting has more probability to be true if more people saw the UFO.
+I wanted to see if there is a mass observation, in what ratio the observers agree in the shape of the sightings - the higher, the more probable they really saw something.
+Spheres and Ovals produce the highest levels of agreement (median consistency near 100%), suggesting these shapes are visually distinct and unmistakable. In contrast, reports of Circles and Disks show significant disagreement (medians < 65%), indicating that these terms are often used inconsistently by witnesses to describe similar phenomena.
+
+After thinking this through I cannot draw a strong conclusion on this topic. Ovals and spheres are not very detailed shape descriptions. If there were any more detailed shapes, like triangles or cigars, I'd conclude that they really saw something real, but this is not satisfactory for my taste.
+
+
+Note: The method for geospatial aggregation in this way is not an accurate way in geospatial analysis - but the question here is not focused on that area, didn't go deeper.
+
+```{r echo=TRUE}
+### Corroborated events: Mass sightings analysis
+# We group by space (approx 1km) and time (1 hour) to find multi-witness events.
+
+us_mass_sightings <- ufo_clean %>%
+  filter(country == "United States of America") %>%
+  filter(continent == "North America") %>%
+  mutate(
+    # Define space/time Buckets
+    # Rounding to 2 decimals gives approx 1km precision
+    lat_bin = round(latitude, 2),
+    long_bin = round(longitude, 2),
+    # Truncate time to the hour
+    time_bin = floor_date(date_time, "hour")
+  ) %>%
+  # Group by these buckets
+  group_by(lat_bin, long_bin, time_bin) %>%
+  # Filter: Keep only groups with at least 3 witnesses
+  filter(n() >= 3) %>%
+  # Calculate Consistency Metrics
+  summarize(
+    witness_count = n(),
+    # How many different shapes were reported in this group?
+    distinct_shapes = n_distinct(ufo_shape),
+    # What was the most common shape?
+    primary_shape = names(sort(table(ufo_shape), decreasing = TRUE)[1]),
+    # Calculate agreement score: (Count of majority shape) / (Total witnesses)
+    agreement_score = max(table(ufo_shape)) / n(),
+    # Keep coordinates for plotting
+    lat = mean(latitude),
+    long = mean(longitude),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(witness_count))
+
+# Map of corroborated sightings
+us_map <- map_data("state")
+
+ggplot() +
+  # Draw states
+  geom_polygon(data = us_map, aes(x = long, y = lat, group = group), 
+               fill = "gray95", color = "white") +
+  # Add sightings
+  geom_point(data = us_mass_sightings, 
+             aes(x = long, y = lat, size = witness_count, color = agreement_score), 
+             alpha = 0.8) +
+  scale_color_viridis_c(option = "plasma", labels = scales::percent, name = "Consistency") +
+  scale_size_continuous(range = c(3, 9), name = "Witnesses") +
+  coord_map("polyconic") + 
+  theme_void() +
+  labs(
+    title = "Corroborated Sightings in the United States",
+    subtitle = "Events with 3+ witnesses agreeing on the shape.",
+    caption = "Filtered to contiguous US coordinates"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(size = 20, face = "bold"), # Make text bigger too
+    plot.subtitle = element_text(size = 14)
+  )
+
+### Shape consistency analysis: Which objects are "Unmistakable"?
+
+# Filter to common shapes so the plot isn't cluttered
+common_shapes <- us_mass_sightings %>%
+  count(primary_shape) %>%
+  slice_max(n, n = 15) %>% # Keep top 15 most common primary shapes
+  pull(primary_shape)
+
+# Plot agreement scores by shape
+us_mass_sightings %>%
+  filter(primary_shape %in% common_shapes) %>%
+  ggplot(aes(x = reorder(primary_shape, agreement_score, FUN = median), 
+             y = agreement_score, 
+             fill = primary_shape)) +
+  # Boxplot shows the spread of agreement
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  # Jitter adds the raw data points so we can see the sample size
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  coord_flip() + 
+  theme_minimal() +
+  labs(
+    title = "The 'Unmistakable' Factor: Shape Consistency",
+    subtitle = "Witnesses agree most often when seeing 'Formations' or 'Cigars'.\nVague shapes like 'Lights' cause more disagreement.",
+    x = "Reported Primary Shape",
+    y = "Witness Agreement Score (% of group matching)"
+  )
+```
+
+## Multi-witness prediction
+I tried to assess if I am able to predict if a sighting is multi-witness sighting from the shape, length and the part of the day.
+
+I grouped shapes to Vague/Detailed categories.
+
+I trained a logistic regression model for the prediction, because it is more flexible with non-linear cyclic data - which we have now. The VIF values are great, so the data doesn't show multicollinearity.
+
+The coefficients are significant for Vague shapes, duration, and Evening - and with negative direction for Morning.
+
+The model demonstrates moderate discrimination capacity (AUC = 0.68), indicating that shape, duration, and time of day are valid predictors of corroboration. However, the low explanatory power (R2=0.03) suggests that while these factors influence the likelihood of corroboration, they are not the primary drivers. Corroboration is likely determined by unmeasured external factors (e.g., population density or latest news about UFOs around) rather than the object's characteristics alone.
+
+```{r echo=TRUE}
+
+# Create features
+model_data <- ufo_clean %>%
+  filter(!is.na(latitude), !is.na(longitude), !is.na(encounter_length), !is.na(ufo_shape)) %>%
+  mutate(
+    # Spatiotemporal bins (for finding neighbors)
+    lat_bin = round(latitude, 1), 
+    lon_bin = round(longitude, 1),
+    time_bin = round_date(date_time, unit = "1 hour"),
+    
+    # Shape grouping: Vague vs. Detailed
+    is_detailed = ifelse(
+      ufo_shape %in% c("triangle", "disk", "cigar", "formation", "diamond", "cylinder", "sphere", "oval"), 
+      "Detailed Structure", 
+      "Vague (Light/Flash)"
+    ),
+    
+    # Log duration 
+    log_duration = log(encounter_length + 1)
+  ) %>%
+  
+  # 4. Calculate cluster target
+  group_by(lat_bin, lon_bin, time_bin) %>%
+  mutate(
+    cluster_size = n(),
+    is_corroborated = as.numeric(cluster_size >= 3) 
+  ) %>%
+  ungroup()
+
+model <- glm(
+  is_corroborated ~ 
+    is_detailed + 
+    log_duration + 
+    time_of_day,
+  
+  data = model_data,
+  family = binomial()
+)
+
+# Model summary
+tbl_regression(model, exponentiate = TRUE) %>% 
+  bold_p() %>%      # Bold significant p-values
+  italicize_levels() %>% 
+  as_gt() %>%       # Convert to 'gt' for titles
+  tab_header(title = "Factors Predicting Corroborated Sightings")
+
+# VIF Check
+check_collinearity(model) %>% 
+  plot() %>% 
+  print() 
+
+# Model performance metrics
+
+model_performance(model) %>% knitr::kable(digits = 3, caption = "Model Performance Metrics")
+
+# ROC Curve
+performance_roc(model) %>% 
+  plot()
+```
+
+```{r echo=TRUE}
+
+results <- tidy(model, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term != "(Intercept)")
+
+# Plot
+ggplot(results, aes(x = reorder(term, estimate), y = estimate)) +
+  geom_point(size = 4, color = "dodgerblue") +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(
+    title = "What predicts a Multi-witness Sighting?",
+    subtitle = "Points > 1 mean MORE likely to be multi-witnessed",
+    y = "Odds Ratio (1.0 = No Effect)",
+    x = "Predictor"
+  ) +
+  theme_minimal()
+```
